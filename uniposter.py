@@ -87,18 +87,24 @@ class Worker(QThread):
     result_ready = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, method, url, headers, data, json_data, parent=None):
+    def __init__(self, method, url, headers, data, json_data, proxies=None, parent=None): # Add proxies parameter
         super().__init__(parent)
         self.method = method
         self.url = url
         self.headers = headers
         self.data = data
         self.json_data = json_data
+        self.proxies = proxies # Store proxies
         self.session = requests.Session() # Use a session within the thread
 
     def run(self):
         response = None # Ensure response is defined for finally block
         try:
+            # Apply proxies if provided
+            if self.proxies:
+                self.session.proxies = self.proxies
+                self.progress_update.emit(f"使用代理: {self.proxies}") # Inform user about proxy usage
+
             self.progress_update.emit(f"正在准备 {self.method} 请求至 {self.url}...")
             req = requests.Request(self.method,
                                    self.url,
@@ -391,6 +397,33 @@ class RequesterApp(QWidget):
         self.radio_raw.toggled.connect(self.update_raw_options)
         self.radio_raw.toggled.connect(lambda checked: checked and self.body_stacked_widget.setCurrentIndex(2))
 
+        # -- Proxy Tab --
+        self.proxy_tab = QWidget()
+        proxy_layout = QVBoxLayout(self.proxy_tab)
+        proxy_layout.setContentsMargins(10, 10, 10, 10)
+        proxy_layout.setSpacing(8)
+
+        proxy_group_box = QGroupBox("代理设置")
+        proxy_group_layout = QVBoxLayout()
+
+        self.proxy_enable_checkbox = QCheckBox("启用代理")
+        self.proxy_enable_checkbox.stateChanged.connect(self.update_proxy_input_state)
+        proxy_group_layout.addWidget(self.proxy_enable_checkbox)
+
+        proxy_url_layout = QHBoxLayout()
+        proxy_url_layout.addWidget(QLabel("代理 URL:"))
+        self.proxy_url_input = QLineEdit()
+        self.proxy_url_input.setPlaceholderText("例如: http://user:pass@127.0.0.1:8080 或 socks5://127.0.0.1:1080")
+        self.proxy_url_input.setEnabled(False) # Initially disabled
+        proxy_url_layout.addWidget(self.proxy_url_input)
+        proxy_group_layout.addLayout(proxy_url_layout)
+
+        proxy_group_box.setLayout(proxy_group_layout)
+        proxy_layout.addWidget(proxy_group_box)
+        proxy_layout.addStretch(1) # Push settings to the top
+        self.tabs.addTab(self.proxy_tab, "Proxy")
+        # --- End Proxy Tab ---
+
         # --- Response Area Container ---
         response_widget = QWidget()
         response_layout = QVBoxLayout(response_widget)
@@ -428,6 +461,7 @@ class RequesterApp(QWidget):
         self.populate_history_list()
         self.update_body_input_state()
         self.update_raw_options() # Set initial state for raw options
+        self.update_proxy_input_state() # Set initial state for proxy input
 
         # Set initial opacity
         self.set_window_opacity(self.opacity_slider.value())
@@ -613,6 +647,10 @@ class RequesterApp(QWidget):
                 if raw_body:
                     body_preview = raw_body[:100] + ('...' if len(raw_body) > 100 else '')
                     tooltip_text += f"Raw Body ({raw_type}):\n{body_preview}\n"
+            # Add Proxy info to tooltip
+            if entry.get("proxy_enabled", False):
+                proxy_url = entry.get("proxy_url", "N/A")
+                tooltip_text += f"Proxy: {proxy_url}\n"
             item.setToolTip(tooltip_text.strip())
 
             self.history_list.addItem(item)
@@ -643,6 +681,11 @@ class RequesterApp(QWidget):
                 current_data["raw_body"] = self.body_input.toPlainText()
                 current_data["raw_type"] = self.raw_type_combo.currentText()
         # --- End gather data ---
+
+        # --- Gather Proxy Data ---
+        current_data["proxy_enabled"] = self.proxy_enable_checkbox.isChecked()
+        current_data["proxy_url"] = self.proxy_url_input.text().strip() if current_data["proxy_enabled"] else ""
+        # --- End Gather Proxy Data ---
 
         if self.modifying_history_id:
             # --- Update existing entry ---
@@ -720,6 +763,13 @@ class RequesterApp(QWidget):
 
         self.update_body_input_state()
 
+        # --- Populate Proxy Settings ---
+        proxy_enabled = entry.get("proxy_enabled", False)
+        self.proxy_enable_checkbox.setChecked(proxy_enabled)
+        self.proxy_url_input.setText(entry.get("proxy_url", ""))
+        self.update_proxy_input_state() # Ensure input field state matches checkbox
+        # --- End Populate Proxy Settings ---
+
     def clear_history(self):
         """Clears the history list after confirmation."""
         reply = QMessageBox.question(self, '确认清除',
@@ -772,6 +822,11 @@ class RequesterApp(QWidget):
         self.body_stacked_widget.setEnabled(can_have_body)
         if not can_have_body and not self.radio_none.isChecked():
             self.radio_none.setChecked(True)
+
+    def update_proxy_input_state(self):
+        """Enables or disables the proxy URL input based on the checkbox."""
+        is_enabled = self.proxy_enable_checkbox.isChecked()
+        self.proxy_url_input.setEnabled(is_enabled)
 
     def update_raw_options(self):
         """Shows/hides JSON format button and enables/disables highlighter."""
@@ -834,6 +889,7 @@ class RequesterApp(QWidget):
         request_data = None
         request_json = None
         headers = self.get_table_data(self.headers_table) # Get user-defined headers
+        proxies = None # Initialize proxies as None
 
         if not url:
             QMessageBox.warning(self, '警告', 'URL 不能为空！')
@@ -877,13 +933,30 @@ class RequesterApp(QWidget):
                     request_json = None
         # --- End Prepare Body ---
 
+        # --- Prepare Proxy ---
+        if self.proxy_enable_checkbox.isChecked():
+            proxy_url = self.proxy_url_input.text().strip()
+            if proxy_url:
+                # Basic validation: check if it contains ://
+                if "://" not in proxy_url:
+                     QMessageBox.warning(self, '代理格式错误', '代理 URL 格式无效。应包含协议 (例如 http://, https://, socks5://)。')
+                     return
+                proxies = {
+                    'http': proxy_url,
+                    'https': proxy_url
+                }
+            else:
+                QMessageBox.warning(self, '警告', '代理已启用，但未提供代理 URL。')
+                return
+        # --- End Prepare Proxy ---
+
         self.response_area.clear()
         self.response_area.setText(f"正在初始化请求 {method} 至 {url}...")
         self.send_button.setEnabled(False) # Disable send button
         QApplication.processEvents() # Update UI
 
         # --- Start Worker Thread ---
-        self.worker = Worker(method, url, headers, request_data, request_json) # Pass updated headers
+        self.worker = Worker(method, url, headers, request_data, request_json, proxies) # Pass proxies
         self.worker.progress_update.connect(self.update_response_progress)
         self.worker.result_ready.connect(self.handle_response)
         self.worker.error_occurred.connect(self.handle_error)
