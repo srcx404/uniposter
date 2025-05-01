@@ -202,7 +202,7 @@ class RequesterApp(QWidget):
             QMessageBox.warning(self, "保存错误", f"无法保存历史记录: {e}")
 
     def initUI(self):
-        self.setWindowTitle('UniPoster v1.2')  # Version bump
+        self.setWindowTitle('UniPoster v1.3')  # Version bump
         self.setGeometry(150, 100, 1000, 750)  # Wider window for history
         self.setWindowIcon(QIcon('icon.ico'))  # Set application icon
 
